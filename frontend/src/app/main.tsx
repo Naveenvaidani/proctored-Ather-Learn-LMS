@@ -1,0 +1,20 @@
+/* eslint-disable */
+/* eslint-disable react/forbid-dom-props */
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import { App } from "./App";
+import { AppProviders } from "./providers";
+import "../themes/tokens.css";
+
+ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <AppProviders>
+        <App />
+      </AppProviders>
+    </BrowserRouter>
+  </React.StrictMode>
+);
+
+

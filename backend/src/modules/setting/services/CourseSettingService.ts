@@ -1,0 +1,353 @@
+import {injectable, inject} from 'inversify';
+import {GLOBAL_TYPES} from '#root/types.js';
+import {
+  AuditingDto,
+  CourseSetting,
+  DetectorOptionsDto,
+  DetectorSettingsDto,
+  ProctoringSettingsDto,
+  SettingsDto,
+} from '#root/modules/setting/classes/index.js';
+import {
+  BadRequestError,
+  ForbiddenError,
+  InternalServerError,
+  NotFoundError,
+} from 'routing-controllers';
+import {
+  BaseService,
+  MongoDatabase,
+  ISettingRepository,
+  ICourseRepository,
+} from '#shared/index.js';
+import {getISTFormattedTimestamp} from '#root/utils/toISOFormat.js';
+import {ObjectId} from 'mongodb';
+
+/**
+ * Service responsible for course settings operations.
+ * Handles business logic for creating, reading, and updating course settings.
+ */
+@injectable()
+class CourseSettingService extends BaseService {
+  constructor(
+    @inject(GLOBAL_TYPES.SettingRepo)
+    private readonly settingsRepo: ISettingRepository,
+
+    @inject(GLOBAL_TYPES.CourseRepo)
+    private readonly courseRepo: ICourseRepository,
+
+    @inject(GLOBAL_TYPES.Database)
+    private readonly mongoDatabase: MongoDatabase,
+  ) {
+    super(mongoDatabase);
+  }
+
+  /**
+   * Creates new course settings for a course and version.
+   * Validates that the course and version exist before creating settings.
+   * @param courseSettings - The course settings to create
+   * @returns The created course settings
+   * @throws NotFoundError if course or course version doesn't exist
+   * @throws InternalServerError if creation fails
+   */
+  async createCourseSettings(
+    courseSettings: CourseSetting,
+  ): Promise<CourseSetting> {
+    return this._withTransaction(async session => {
+      // Check if the course exists
+      const course = await this.courseRepo.read(
+        courseSettings.courseId.toString(),
+        session,
+      );
+
+      if (!course) {
+        throw new NotFoundError(
+          `Course with ID ${courseSettings.courseId} not found.`,
+        );
+      }
+
+      // check if courseVersion is valid
+
+      const courseVersion = await this.courseRepo.readVersion(
+        courseSettings.courseVersionId.toString(),
+        session,
+      );
+
+      if (!courseVersion) {
+        throw new NotFoundError(
+          `Course version for course Version ID ${courseSettings.courseVersionId} not found.`,
+        );
+      }
+
+      // check if courseSettings already exists for the course
+
+      const existingSettings = await this.settingsRepo.readCourseSettings(
+        courseSettings.courseId.toString(),
+        courseSettings.courseVersionId.toString(),
+        session,
+      );
+
+      if (existingSettings) {
+        throw new BadRequestError(
+          `Course settings for course ID ${courseSettings.courseId} and version ID ${courseSettings.courseVersionId} already exist.`,
+        );
+      }
+
+      const createdSettings = await this.settingsRepo.createCourseSettings(
+        courseSettings,
+        session,
+      );
+
+      if (!createdSettings) {
+        throw new InternalServerError(
+          'Failed to create course settings. Please try again later.',
+        );
+      }
+
+      return createdSettings;
+    });
+  }
+
+  async readCourseSettings(
+    courseId: string,
+    courseVersionId: string,
+  ): Promise<CourseSetting | null> {
+    return this._withTransaction(async session => {
+      let courseSettings = await this.settingsRepo.readCourseSettings(
+        courseId,
+        courseVersionId,
+        session,
+      );
+
+      if (!courseSettings) {
+        // Create new settings as in updateCourseSettings
+        const settings = new SettingsDto();
+        settings.proctors = new ProctoringSettingsDto();
+        settings.proctors.detectors = [];
+        settings.linearProgressionEnabled = true;
+        settings.seekForwardEnabled = false;
+        settings.isPublic = false;
+        settings.hpSystem = false;
+        settings.registration = {isActive: true};
+        settings.timeslots = {isActive: false, slots: []};
+        settings.baseHp = 0;
+
+        const created = await this.createCourseSettings(
+          new CourseSetting({
+            courseVersionId,
+            courseId,
+            settings,
+          }),
+        );
+
+        if (!created) {
+          throw new InternalServerError(
+            'Failed to create course settings. Please try again later.',
+          );
+        }
+        return created;
+      }
+
+      return Object.assign(new CourseSetting(), courseSettings);
+    });
+  }
+
+  async updateCourseSettings(
+    courseId: string,
+    courseVersionId: string,
+    detectors: DetectorSettingsDto[],
+    linearProgressionEnabled: boolean,
+    seekForwardEnabled: boolean,
+    hpSystem: boolean,
+    isPublic: boolean,
+    baseHp: number,
+    userId: string,
+  ): Promise<boolean> {
+    return this._withTransaction(async session => {
+      const versionStatus =
+        await this.courseRepo.getCourseVersionStatus(courseVersionId);
+
+      if (versionStatus === 'archived') {
+        throw new ForbiddenError(
+          "This course version is inactive, you can't update settings",
+        );
+      }
+      // Check if the course settings exist
+      const courseSettings = await this.settingsRepo.readCourseSettings(
+        courseId,
+        courseVersionId,
+        session,
+      );
+
+      if (!courseSettings) {
+        const settings = new SettingsDto();
+        settings.proctors = new ProctoringSettingsDto();
+        settings.proctors.detectors = detectors;
+        settings.linearProgressionEnabled = linearProgressionEnabled;
+        settings.seekForwardEnabled = seekForwardEnabled;
+        settings.isPublic = isPublic;
+        settings.hpSystem = hpSystem;
+        settings.baseHp = baseHp;
+
+        settings.audit = [
+          {
+            userId: new ObjectId(userId),
+            modifiedAt: new Date(),
+            timestamp: getISTFormattedTimestamp(),
+            changes: {
+              before: null,
+              after: {
+                detectors,
+                linearProgressionEnabled,
+                seekForwardEnabled,
+                isPublic,
+                hpSystem,
+                baseHp,
+              },
+            },
+          },
+        ];
+        // for linear progression
+        settings.linearProgressionEnabled = linearProgressionEnabled;
+
+        const result = await this.createCourseSettings(
+          new CourseSetting({
+            courseVersionId,
+            courseId,
+            settings,
+          }),
+        );
+
+        if (!result) {
+          throw new InternalServerError(
+            'Failed to create course settings. Please try again later.',
+          );
+        }
+        return result._id ? true : false;
+      }
+
+      const beforeState = {
+        detectors: courseSettings.settings?.proctors?.detectors,
+        linearProgressionEnabled:
+          courseSettings.settings?.linearProgressionEnabled,
+        seekForwardEnabled: courseSettings.settings?.seekForwardEnabled,
+        isPublic: courseSettings.settings?.isPublic,
+        hpSystem: courseSettings.settings?.hpSystem,
+        baseHp: courseSettings.settings?.baseHp,
+      };
+
+      const afterState = {
+        detectors,
+        linearProgressionEnabled,
+        seekForwardEnabled,
+        isPublic,
+        hpSystem,
+        baseHp,
+      };
+
+      const audit: AuditingDto = {
+        userId: new ObjectId(userId),
+        changes: {
+          before: beforeState,
+          after: afterState,
+        },
+        timestamp: getISTFormattedTimestamp(),
+        modifiedAt: new Date(),
+      };
+
+      const result = await this.settingsRepo.updateCourseSettings(
+        courseId,
+        courseVersionId,
+        detectors,
+        linearProgressionEnabled,
+        seekForwardEnabled,
+        hpSystem,
+        isPublic,
+        baseHp,
+        audit,
+        session,
+      );
+
+      if (!result) {
+        throw new InternalServerError(
+          'Failed to add proctoring component. Please try again later.',
+        );
+      }
+
+      return result.acknowledged || false;
+    });
+  }
+
+  // Not needed, but kept for consistency with the original code
+  /*
+  async removeCourseProctoring(
+    courseId: string,
+    courseVersionId: string,
+    detectorName: ProctoringComponent,
+  ): Promise<boolean> {
+    return this._withTransaction(async session => {
+      // Check if the course settings exist
+      const courseSettings = await this.settingsRepo.readCourseSettings(
+        courseId,
+        courseVersionId,
+        session,
+      );
+
+      if (!courseSettings) {
+        throw new NotFoundError(
+          `Course settings for course ID ${courseId} and version ID ${courseVersionId} not found.`,
+        );
+      }
+
+      const result = await this.settingsRepo.removeCourseProctoring(
+        courseId,
+        courseVersionId,
+        detectorName,
+        session,
+      );
+
+      if (!result) {
+        throw new InternalServerError(
+          'Failed to remove proctoring component. Please try again later.',
+        );
+      }
+
+      return result.acknowledged || false;
+    });
+  }
+    */
+
+  /**
+   * Checks if linear progression is enabled for a specific course and version.
+   * @param courseId - The ID of the course
+   * @param courseVersionId - The ID of the course version
+   * @returns False if linear progression field is false, true otherwise
+   */
+  async isLinearProgressionEnabled(
+    courseId: string,
+    courseVersionId: string,
+  ): Promise<boolean> {
+    return this._withTransaction(async session => {
+      const isCourseEnabled =
+        await this.settingsRepo.isLinearProgressionEnabled(
+          courseId,
+          courseVersionId,
+          session,
+        );
+      return isCourseEnabled;
+    });
+  }
+
+  async getSettingsByVersionIds(
+    courseVersionIds: ObjectId[],
+  ): Promise<CourseSetting[] | null> {
+    return this._withTransaction(async session => {
+      return await this.settingsRepo.getSettingsByVersionIds(
+        courseVersionIds,
+        session,
+      );
+    });
+  }
+}
+
+export {CourseSettingService};
