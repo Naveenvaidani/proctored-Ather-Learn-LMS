@@ -186,11 +186,6 @@ The backend expects a valid MongoDB connection string. If that is missing, the s
 Contributions are welcome. If you plan to extend the system, the cleanest approach is to add new backend capabilities as isolated modules and keep frontend feature logic in dedicated hooks, services, and pages. That pattern is already used throughout the codebase and is the safest way to maintain scalability.
 
 If you are preparing a pull request, please include a concise explanation of the architectural change, the behavior change, and any testing you performed. For changes that affect validation policy or data storage, include the reasoning behind the change and any compatibility impact.
-
-## License
-
-This project is distributed under the MIT License. See the `LICENSE` file if present in your upstream repository or organization template.
-
 ## Summary
 
 Real-Time Proctored Adaptive Learning Platform is an edge-first, privacy-preserving learning integrity system built for real-world educational and enterprise scenarios. It combines computer vision, audio intelligence, behavior telemetry, adaptive enforcement, and analytics into one coherent control loop. The result is a platform that is more actionable than a traditional LMS and more privacy-conscious than cloud-heavy proctoring tools.
